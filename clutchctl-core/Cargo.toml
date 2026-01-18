@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Core library for USB HID foot pedal device configuration"
 
 [dependencies]
-rusb = { workspace = true }
+hidapi = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 bitflags = { workspace = true }

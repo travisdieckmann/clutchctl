@@ -4,11 +4,10 @@ use crate::configuration::{Configuration, Trigger};
 use crate::device::{DeviceCapabilities, PedalDevice};
 use crate::error::{PedalError, Result};
 use crate::protocol::{self, ConfigPacket, TriggerMode};
-use crate::usb::UsbInterfaceLock;
-use crate::{CONFIG_ENDPOINT, CONFIG_INTERFACE, INTERRUPT_IN_ENDPOINT, USB_TIMEOUT_MS};
+use crate::usb::{open_device_path, HidDeviceInfo};
+use hidapi::HidDevice;
 use log::debug;
-use rusb::{Device, DeviceHandle, GlobalContext};
-use std::time::Duration;
+use std::sync::Mutex;
 
 /// USB pedal device models
 #[derive(Debug, Clone)]
@@ -68,26 +67,30 @@ impl IkkegolModel {
 
 /// iKKEGOL pedal device
 pub struct IkkegolDevice {
-    handle: DeviceHandle<GlobalContext>,
+    device: Mutex<HidDevice>,
     id: usize,
     model: IkkegolModel,
     version: String,
     capabilities: DeviceCapabilities,
-    configurations: Vec<Configuration>,
-    trigger_modes: Vec<TriggerMode>,
-    modified_pedals: Vec<bool>,
-    last_error: Option<String>,
+    configurations: Mutex<Vec<Configuration>>,
+    trigger_modes: Mutex<Vec<TriggerMode>>,
+    modified_pedals: Mutex<Vec<bool>>,
 }
 
 impl IkkegolDevice {
     /// Create a new iKKEGOL device
-    pub fn new(device: Device<GlobalContext>, id: usize) -> Result<Self> {
-        // Get device descriptor to check USB IDs
-        let desc = device.device_descriptor()?;
-        let vendor_id = desc.vendor_id();
-        let product_id = desc.product_id();
+    pub fn new(info: HidDeviceInfo, id: usize) -> Result<Self> {
+        let vendor_id = info.vendor_id;
+        let product_id = info.product_id;
 
-        let mut handle = device.open()?;
+        debug!("Opening iKKEGOL device {:04x}:{:04x} at path {:?}",
+               vendor_id, product_id, info.path);
+
+        // Open the device by path
+        let device = open_device_path(&info.path)?;
+
+        // Set non-blocking mode for reads with timeout
+        device.set_blocking_mode(false)?;
 
         // Determine model based on USB ID
         let model = match (vendor_id, product_id) {
@@ -97,7 +100,7 @@ impl IkkegolDevice {
             (0x5131, 0x2019) => IkkegolModel::FootSwitch1P,
             (0x1a86, 0xe026) => {
                 // For iKKEGOL devices, try to read the model from the device
-                if let Ok((model_str, _)) = Self::read_model_and_version(&mut handle) {
+                if let Ok((model_str, _)) = Self::read_model_and_version_static(&device) {
                     IkkegolModel::from_str(&model_str)
                 } else {
                     IkkegolModel::FS2020U1IR // Default to 3-pedal model
@@ -107,7 +110,7 @@ impl IkkegolDevice {
         };
 
         // Try to read version from device (may not work for all models)
-        let version = if let Ok((_, ver)) = Self::read_model_and_version(&mut handle) {
+        let version = if let Ok((_, ver)) = Self::read_model_and_version_static(&device) {
             ver
         } else {
             "unknown".to_string()
@@ -122,49 +125,66 @@ impl IkkegolDevice {
         let modified_pedals = vec![false; pedal_count];
 
         Ok(Self {
-            handle,
+            device: Mutex::new(device),
             id,
             model,
             version,
             capabilities,
-            configurations,
-            trigger_modes,
-            modified_pedals,
-            last_error: None,
+            configurations: Mutex::new(configurations),
+            trigger_modes: Mutex::new(trigger_modes),
+            modified_pedals: Mutex::new(modified_pedals),
         })
     }
 
-    /// Read model and version from device
-    fn read_model_and_version(handle: &mut DeviceHandle<GlobalContext>) -> Result<(String, String)> {
-        let mut lock = UsbInterfaceLock::new(handle, CONFIG_INTERFACE)?;
+    /// Write data to the device (8-byte chunks)
+    fn hid_write(device: &HidDevice, data: &[u8]) -> Result<()> {
+        // hidapi requires a report ID as the first byte
+        // For devices without report IDs, use 0x00
+        let mut buffer = vec![0x00];
+        buffer.extend_from_slice(data);
 
+        debug!("Writing {} bytes: {:02x?}", data.len(), data);
+        device.write(&buffer)?;
+        Ok(())
+    }
+
+    /// Read data from the device (8 bytes)
+    fn hid_read(device: &HidDevice, timeout_ms: i32) -> Result<[u8; 8]> {
+        let mut buffer = [0u8; 8];
+
+        // hidapi read returns the number of bytes read
+        let bytes_read = device.read_timeout(&mut buffer, timeout_ms)?;
+
+        if bytes_read == 0 {
+            return Err(PedalError::Timeout);
+        }
+
+        debug!("Read {} bytes: {:02x?}", bytes_read, &buffer[..bytes_read]);
+        Ok(buffer)
+    }
+
+    /// Read model and version from device (static version for use during construction)
+    fn read_model_and_version_static(device: &HidDevice) -> Result<(String, String)> {
         // Send read model command
         let cmd = protocol::commands::READ_MODEL;
-        // Use a longer timeout for model detection to be safe with all devices
-        let timeout = Duration::from_millis(500);
 
-        lock.handle().write_interrupt(
-            CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-            &cmd,
-            timeout,
-        )?;
+        // Write with report ID prefix
+        let mut buffer = vec![0x00];
+        buffer.extend_from_slice(&cmd);
+        device.write(&buffer)?;
 
         // Read response (up to 32 bytes in 8-byte chunks)
         let mut response = Vec::new();
         for _ in 0..4 {
-            let mut buffer = [0u8; 8];
-            match lock.handle().read_interrupt(
-                INTERRUPT_IN_ENDPOINT,
-                &mut buffer,
-                timeout,
-            ) {
-                Ok(n) => {
-                    response.extend_from_slice(&buffer[..n]);
+            let mut buf = [0u8; 8];
+            match device.read_timeout(&mut buf, 500) {
+                Ok(n) if n > 0 => {
+                    response.extend_from_slice(&buf[..n]);
                     if n < 8 {
                         break;
                     }
                 }
-                Err(_) => break,
+                _ => break,
             }
         }
 
@@ -182,8 +202,16 @@ impl IkkegolDevice {
         }
     }
 
+    /// Get timeout based on model
+    fn get_timeout_ms(&self) -> i32 {
+        match self.model {
+            IkkegolModel::PCsensor | IkkegolModel::Scythe | IkkegolModel::Scythe2 => 500,
+            _ => 100,
+        }
+    }
+
     /// Read configuration for a specific pedal
-    fn read_pedal_config(&mut self, pedal_index: usize) -> Result<()> {
+    fn read_pedal_config(&self, pedal_index: usize) -> Result<()> {
         if pedal_index >= self.capabilities.pedal_count {
             return Err(PedalError::InvalidPedalIndex(
                 pedal_index,
@@ -194,82 +222,69 @@ impl IkkegolDevice {
         let protocol_index = self.capabilities.get_protocol_index(pedal_index)
             .ok_or_else(|| PedalError::InvalidPedalIndex(pedal_index, self.capabilities.pedal_count))?;
 
-        let mut lock = UsbInterfaceLock::new(&mut self.handle, CONFIG_INTERFACE)?;
+        let device = self.device.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
 
         // Send read config command
         let cmd = protocol::commands::read_config(protocol_index as u8);
-        // Some devices may need more time to respond
-        let timeout_ms = match self.model {
-            IkkegolModel::PCsensor | IkkegolModel::Scythe | IkkegolModel::Scythe2 => 500,  // 500ms for these devices
-            _ => USB_TIMEOUT_MS,  // 100ms for others
-        };
-        let timeout = Duration::from_millis(timeout_ms);
+        let timeout_ms = self.get_timeout_ms();
 
-        lock.handle().write_interrupt(
-            CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-            &cmd,
-            timeout,
-        )?;
+        Self::hid_write(&device, &cmd)?;
 
         // Read response (40 bytes in 8-byte chunks)
         let mut packet_bytes = [0u8; 40];
         let mut offset = 0;
 
         while offset < 40 {
-            let mut buffer = [0u8; 8];
-            let n = lock.handle().read_interrupt(
-                INTERRUPT_IN_ENDPOINT,
-                &mut buffer,
-                timeout,
-            )?;
-
-            let copy_len = std::cmp::min(n, 40 - offset);
-            packet_bytes[offset..offset + copy_len].copy_from_slice(&buffer[..copy_len]);
-            offset += copy_len;
-
-            if n < 8 {
-                break;
+            match Self::hid_read(&device, timeout_ms) {
+                Ok(buffer) => {
+                    let copy_len = std::cmp::min(8, 40 - offset);
+                    packet_bytes[offset..offset + copy_len].copy_from_slice(&buffer[..copy_len]);
+                    offset += copy_len;
+                }
+                Err(PedalError::Timeout) if offset > 0 => break,
+                Err(e) => return Err(e),
             }
         }
 
+        // Drop device lock before locking configurations
+        drop(device);
+
         // Parse the packet
         let packet = ConfigPacket::from_bytes(&packet_bytes);
-        self.configurations[pedal_index] = protocol::ikkegol::parse_config(&packet)?;
+        let config = protocol::ikkegol::parse_config(&packet)?;
+
+        let mut configurations = self.configurations.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+        configurations[pedal_index] = config;
 
         Ok(())
     }
 
     /// Read trigger modes for all pedals
-    fn read_trigger_modes(&mut self) -> Result<()> {
-        let mut lock = UsbInterfaceLock::new(&mut self.handle, CONFIG_INTERFACE)?;
+    fn read_trigger_modes(&self) -> Result<()> {
+        let device = self.device.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
 
         // Send read trigger modes command
         let cmd = protocol::commands::READ_TRIGGER_MODES;
-        // Some devices may need more time to respond
-        let timeout_ms = match self.model {
-            IkkegolModel::PCsensor | IkkegolModel::Scythe | IkkegolModel::Scythe2 => 500,  // 500ms for these devices
-            _ => USB_TIMEOUT_MS,  // 100ms for others
-        };
-        let timeout = Duration::from_millis(timeout_ms);
+        let timeout_ms = self.get_timeout_ms();
 
-        lock.handle().write_interrupt(
-            CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-            &cmd,
-            timeout,
-        )?;
+        Self::hid_write(&device, &cmd)?;
 
         // Read response (up to 8 bytes)
-        let mut buffer = [0u8; 8];
-        let n = lock.handle().read_interrupt(
-            INTERRUPT_IN_ENDPOINT,
-            &mut buffer,
-            timeout,
-        )?;
+        let buffer = Self::hid_read(&device, timeout_ms)?;
+
+        // Drop device lock before locking trigger_modes
+        drop(device);
 
         // Parse trigger modes
+        let mut trigger_modes = self.trigger_modes.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock trigger modes".to_string()))?;
+
         for i in 0..self.capabilities.pedal_count {
-            if i < n {
-                self.trigger_modes[i] = TriggerMode::from_u8(buffer[i])
+            if i < 8 {
+                trigger_modes[i] = TriggerMode::from_u8(buffer[i])
                     .unwrap_or(TriggerMode::Press);
             }
         }
@@ -278,7 +293,7 @@ impl IkkegolDevice {
     }
 
     /// Write configuration for a specific pedal
-    fn write_pedal_config(&mut self, pedal_index: usize) -> Result<()> {
+    fn write_pedal_config(&self, pedal_index: usize) -> Result<()> {
         if pedal_index >= self.capabilities.pedal_count {
             return Err(PedalError::InvalidPedalIndex(
                 pedal_index,
@@ -289,42 +304,32 @@ impl IkkegolDevice {
         let protocol_index = self.capabilities.get_protocol_index(pedal_index)
             .ok_or_else(|| PedalError::InvalidPedalIndex(pedal_index, self.capabilities.pedal_count))?;
 
-        let mut lock = UsbInterfaceLock::new(&mut self.handle, CONFIG_INTERFACE)?;
-        // Some devices may need more time to respond
-        let timeout_ms = match self.model {
-            IkkegolModel::PCsensor | IkkegolModel::Scythe | IkkegolModel::Scythe2 => 500,  // 500ms for these devices
-            _ => USB_TIMEOUT_MS,  // 100ms for others
+        // Get configuration first
+        let config = {
+            let configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+            configurations[pedal_index].clone()
         };
-        let timeout = Duration::from_millis(timeout_ms);
+
+        let device = self.device.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
 
         // Begin write session
-        lock.handle().write_interrupt(
-            CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-            &protocol::commands::BEGIN_WRITE,
-            timeout,
-        )?;
+        Self::hid_write(&device, &protocol::commands::BEGIN_WRITE)?;
 
         // Encode configuration
-        let packet = protocol::ikkegol::encode_config(&self.configurations[pedal_index])?;
+        let packet = protocol::ikkegol::encode_config(&config)?;
         let packet_bytes = packet.to_bytes();
 
         // Send write config header
         let cmd = protocol::commands::write_config_header(packet.size, protocol_index as u8);
-        lock.handle().write_interrupt(
-            CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-            &cmd,
-            timeout,
-        )?;
+        Self::hid_write(&device, &cmd)?;
 
         // Write packet data in 8-byte chunks
         for chunk in packet_bytes.chunks(8) {
             let mut buffer = [0u8; 8];
             buffer[..chunk.len()].copy_from_slice(chunk);
-            lock.handle().write_interrupt(
-                CONFIG_ENDPOINT | rusb::constants::LIBUSB_ENDPOINT_OUT,
-                &buffer,
-                timeout,
-            )?;
+            Self::hid_write(&device, &buffer)?;
         }
 
         Ok(())
@@ -368,13 +373,24 @@ impl PedalDevice for IkkegolDevice {
         self.read_trigger_modes()?;
 
         // Apply trigger modes to configurations
-        for i in 0..self.capabilities.pedal_count {
-            let trigger = Trigger::from(self.trigger_modes[i]);
-            self.configurations[i].set_trigger(trigger);
+        {
+            let trigger_modes = self.trigger_modes.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock trigger modes".to_string()))?;
+            let mut configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+
+            for i in 0..self.capabilities.pedal_count {
+                let trigger = Trigger::from(trigger_modes[i]);
+                configurations[i].set_trigger(trigger);
+            }
         }
 
         // Clear modification flags
-        self.modified_pedals.fill(false);
+        {
+            let mut modified_pedals = self.modified_pedals.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock modified flags".to_string()))?;
+            modified_pedals.fill(false);
+        }
 
         Ok(())
     }
@@ -382,17 +398,26 @@ impl PedalDevice for IkkegolDevice {
     fn save_configuration(&mut self) -> Result<()> {
         debug!("Saving configuration for device {}", self.id);
 
+        // Get list of modified pedals
+        let modified_indices: Vec<usize> = {
+            let modified_pedals = self.modified_pedals.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock modified flags".to_string()))?;
+            (0..self.capabilities.pedal_count)
+                .filter(|&i| modified_pedals[i])
+                .collect()
+        };
+
         // Write modified pedal configurations
-        for i in 0..self.capabilities.pedal_count {
-            if self.modified_pedals[i] {
-                self.write_pedal_config(i)?;
-            }
+        for i in modified_indices {
+            self.write_pedal_config(i)?;
         }
 
-        // TODO: Write trigger modes if modified
-
         // Clear modification flags
-        self.modified_pedals.fill(false);
+        {
+            let mut modified_pedals = self.modified_pedals.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock modified flags".to_string()))?;
+            modified_pedals.fill(false);
+        }
 
         Ok(())
     }
@@ -405,7 +430,9 @@ impl PedalDevice for IkkegolDevice {
             ));
         }
 
-        Ok(self.configurations[pedal_index].clone())
+        let configurations = self.configurations.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+        Ok(configurations[pedal_index].clone())
     }
 
     fn set_pedal_configuration(&mut self, pedal_index: usize, config: Configuration) -> Result<()> {
@@ -416,17 +443,30 @@ impl PedalDevice for IkkegolDevice {
             ));
         }
 
-        self.configurations[pedal_index] = config;
-        self.modified_pedals[pedal_index] = true;
+        {
+            let mut configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+            configurations[pedal_index] = config;
+        }
+
+        {
+            let mut modified_pedals = self.modified_pedals.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock modified flags".to_string()))?;
+            modified_pedals[pedal_index] = true;
+        }
 
         Ok(())
     }
 
     fn has_modifications(&self) -> bool {
-        self.modified_pedals.iter().any(|&m| m)
+        if let Ok(modified_pedals) = self.modified_pedals.lock() {
+            modified_pedals.iter().any(|&m| m)
+        } else {
+            false
+        }
     }
 
     fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+        None
     }
 }

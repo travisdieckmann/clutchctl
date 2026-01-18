@@ -32,11 +32,5 @@ pub const SUPPORTED_DEVICES: &[(u16, u16, &str)] = &[
 pub const VENDOR_ID: u16 = 0x1a86;
 pub const PRODUCT_ID: u16 = 0xe026;
 
-// USB interface constants (common for all devices)
-pub const CONFIG_INTERFACE: u8 = 1;
-pub const CONFIG_ENDPOINT: u8 = 0x02;
-pub const INTERRUPT_IN_ENDPOINT: u8 = 0x82;
-pub const USB_TIMEOUT_MS: u64 = 100;
-
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

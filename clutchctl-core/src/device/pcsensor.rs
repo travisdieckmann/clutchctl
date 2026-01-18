@@ -1,4 +1,4 @@
-//! PCsensor USB pedal device implementation using HID protocol via rusb
+//! PCsensor USB pedal device implementation using HID protocol
 
 use crate::configuration::Configuration;
 use crate::device::{DeviceCapabilities, PedalDevice};
@@ -7,8 +7,10 @@ use crate::protocol::{TriggerMode, ModifierKeys, HID_KEYMAP};
 use crate::configuration::keyboard::{KeyboardConfiguration, KeyMode};
 use crate::configuration::mouse::{MouseConfiguration, MouseButton, MouseMode};
 use crate::configuration::text::TextConfiguration;
+use crate::usb::{open_device_path, HidDeviceInfo};
+use hidapi::HidDevice;
 use log::debug;
-use rusb::DeviceHandle;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -19,63 +21,32 @@ pub enum PCsensorModel {
     FootSwitch1Pedal,  // Single pedal variant (VID: 5131, PID: 2019)
 }
 
-/// PCsensor pedal device using HID protocol via rusb
+/// PCsensor pedal device using HID protocol
 pub struct PCsensorDevice {
-    handle: DeviceHandle<rusb::GlobalContext>,
+    device: Mutex<HidDevice>,
     id: usize,
     model: PCsensorModel,
     version: String,
     capabilities: DeviceCapabilities,
-    configurations: Vec<Configuration>,
-    trigger_modes: Vec<TriggerMode>,
-    modified_pedals: Vec<bool>,
-    interface_number: u8,
+    configurations: Mutex<Vec<Configuration>>,
+    trigger_modes: Mutex<Vec<TriggerMode>>,
+    modified_pedals: Mutex<Vec<bool>>,
 }
-
-// HID Report IDs and constants
-const HID_REPORT_TYPE_OUTPUT: u8 = 0x02;
-const HID_REPORT_TYPE_INPUT: u8 = 0x01;
-const HID_REQUEST_SET_REPORT: u8 = 0x09;
-const HID_REQUEST_GET_REPORT: u8 = 0x01;
 
 impl PCsensorDevice {
     /// Create a new PCsensor device
-    pub fn new(vendor_id: u16, product_id: u16, id: usize) -> Result<Self> {
-        debug!("Opening PCsensor device {:04x}:{:04x} with ID {}", vendor_id, product_id, id);
+    pub fn new(info: HidDeviceInfo, id: usize) -> Result<Self> {
+        debug!("Opening PCsensor device {:04x}:{:04x} at path {:?}",
+               info.vendor_id, info.product_id, info.path);
 
-        // Find and open the device
-        let devices = rusb::devices().map_err(PedalError::Usb)?;
-        let mut device_handle = None;
+        // Open the device by path
+        let device = open_device_path(&info.path)?;
 
-        for device in devices.iter() {
-            let desc = device.device_descriptor().map_err(PedalError::Usb)?;
-            if desc.vendor_id() == vendor_id && desc.product_id() == product_id {
-                debug!("Found matching device at bus {} address {}",
-                      device.bus_number(), device.address());
-                let handle = device.open().map_err(PedalError::Usb)?;
-                debug!("Successfully opened device handle");
-                device_handle = Some(handle);
-                break;
-            }
-        }
-
-        let handle = device_handle.ok_or(PedalError::DeviceNotFound(id))?;
-
-        // PCsensor devices use interface 1 for HID communication
-        let interface_number = 1u8;
-        debug!("Using interface {}", interface_number);
-
-        // Claim interface 1
-        if handle.kernel_driver_active(interface_number).unwrap_or(false) {
-            debug!("Detaching kernel driver from interface {}", interface_number);
-            handle.detach_kernel_driver(interface_number).map_err(PedalError::Usb)?;
-        }
-        debug!("Claiming interface {}", interface_number);
-        handle.claim_interface(interface_number).map_err(PedalError::Usb)?;
-        debug!("Successfully claimed interface {}", interface_number);
+        // Set non-blocking mode for reads with timeout
+        device.set_blocking_mode(false)?;
 
         // Determine model based on product ID
-        let model = if product_id == 0x2019 {
+        let model = if info.product_id == 0x2019 {
             PCsensorModel::FootSwitch1Pedal
         } else {
             PCsensorModel::FootSwitch3Pedal
@@ -103,114 +74,50 @@ impl PCsensorDevice {
         let trigger_modes = vec![TriggerMode::Press; pedal_count];
         let modified_pedals = vec![false; pedal_count];
 
-        let mut device = Self {
-            handle,
+        let mut device_obj = Self {
+            device: Mutex::new(device),
             id,
             model,
             version: "V5.7".to_string(), // Default version
             capabilities,
-            configurations,
-            trigger_modes,
-            modified_pedals,
-            interface_number,
+            configurations: Mutex::new(configurations),
+            trigger_modes: Mutex::new(trigger_modes),
+            modified_pedals: Mutex::new(modified_pedals),
         };
 
         // Load current configuration
         debug!("Loading initial device configuration");
-        device.load_configuration()?;
+        device_obj.load_configuration()?;
         debug!("Successfully initialized PCsensor device");
 
-        Ok(device)
+        Ok(device_obj)
     }
 
-    /// Send HID report using control transfer (SET_REPORT)
-    fn hid_write(&self, data: &[u8; 8]) -> Result<()> {
+    /// Write HID report to device
+    fn hid_write(device: &HidDevice, data: &[u8; 8]) -> Result<()> {
         debug!("Writing HID report: {:02x?}", data);
 
-        // Try interrupt transfer first (some devices prefer this)
-        // Interface 1 uses endpoint 0x02 for OUT
-        let endpoint = 0x02;
+        // hidapi requires a report ID as the first byte
+        // For devices without report IDs, use 0x00
+        let mut buffer = [0u8; 9];
+        buffer[0] = 0x00; // Report ID
+        buffer[1..9].copy_from_slice(data);
 
-        let timeout = Duration::from_secs(1);
-        match self.handle.write_interrupt(endpoint, data, timeout) {
-            Ok(_) => {
-                thread::sleep(Duration::from_millis(30));
-                return Ok(());
-            }
-            Err(e) => {
-                debug!("Interrupt transfer failed: {}, trying control transfer", e);
-            }
-        }
-
-        // Fall back to control transfer
-        let request_type = rusb::request_type(
-            rusb::Direction::Out,
-            rusb::RequestType::Class,
-            rusb::Recipient::Interface,
-        );
-
-        let report_id = 0; // No report ID for these devices
-        let w_value = ((HID_REPORT_TYPE_OUTPUT as u16) << 8) | report_id;
-
-        self.handle
-            .write_control(
-                request_type,
-                HID_REQUEST_SET_REPORT,
-                w_value,
-                self.interface_number as u16,
-                data,
-                timeout,
-            )
-            .map_err(PedalError::Usb)?;
-
+        device.write(&buffer)?;
         thread::sleep(Duration::from_millis(30));
         Ok(())
     }
 
-    /// Read HID report using control transfer (GET_REPORT)
-    fn hid_read(&self) -> Result<[u8; 8]> {
+    /// Read HID report from device
+    fn hid_read(device: &HidDevice) -> Result<[u8; 8]> {
         let mut buffer = [0u8; 8];
-        let timeout = Duration::from_secs(1);
+        let timeout_ms = 1000;
 
-        // Try interrupt transfer first (some devices prefer this)
-        // Interface 1 uses endpoint 0x82 for IN
-        let endpoint = 0x82;
+        let bytes_read = device.read_timeout(&mut buffer, timeout_ms)?;
 
-        match self.handle.read_interrupt(endpoint, &mut buffer, timeout) {
-            Ok(bytes_read) => {
-                if bytes_read != 8 {
-                    return Err(PedalError::Protocol(
-                        format!("Expected 8 bytes, got {}", bytes_read)
-                    ));
-                }
-                debug!("Read HID report via interrupt: {:02x?}", buffer);
-                return Ok(buffer);
-            }
-            Err(e) => {
-                debug!("Interrupt read failed: {}, trying control transfer", e);
-            }
+        if bytes_read == 0 {
+            return Err(PedalError::Timeout);
         }
-
-        // Fall back to control transfer
-        let request_type = rusb::request_type(
-            rusb::Direction::In,
-            rusb::RequestType::Class,
-            rusb::Recipient::Interface,
-        );
-
-        let report_id = 0; // No report ID for these devices
-        let w_value = ((HID_REPORT_TYPE_INPUT as u16) << 8) | report_id;
-
-        let bytes_read = self.handle
-            .read_control(
-                request_type,
-                HID_REQUEST_GET_REPORT,
-                w_value,
-                self.interface_number as u16,
-                &mut buffer,
-                timeout,
-            )
-            .map_err(PedalError::Usb)?;
 
         if bytes_read != 8 {
             return Err(PedalError::Protocol(
@@ -218,12 +125,12 @@ impl PCsensorDevice {
             ));
         }
 
-        debug!("Read HID report via control: {:02x?}", buffer);
+        debug!("Read HID report: {:02x?}", buffer);
         Ok(buffer)
     }
 
     /// Parse configuration from HID report
-    fn parse_configuration(&self, data: &[u8; 8]) -> Configuration {
+    fn parse_configuration(data: &[u8; 8]) -> Configuration {
         match data[1] {
             0 => Configuration::Unconfigured,
             1 | 0x81 => {
@@ -291,7 +198,7 @@ impl PCsensorDevice {
     }
 
     /// Read configuration for a specific pedal
-    fn read_pedal_config(&mut self, pedal_index: usize) -> Result<()> {
+    fn read_pedal_config(&self, pedal_index: usize) -> Result<()> {
         if pedal_index >= self.capabilities.pedal_count {
             return Err(PedalError::InvalidPedalIndex(
                 pedal_index,
@@ -299,15 +206,18 @@ impl PCsensorDevice {
             ));
         }
 
+        let device = self.device.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
+
         // Send read command for this pedal
         let query: [u8; 8] = [0x01, 0x82, 0x08, (pedal_index + 1) as u8, 0, 0, 0, 0];
-        self.hid_write(&query)?;
+        Self::hid_write(&device, &query)?;
 
         // Read first response packet
-        let response = self.hid_read()?;
+        let response = Self::hid_read(&device)?;
 
         // Check if this is a text configuration that needs more data
-        if response[1] == 0x04 {
+        let (config, trigger_mode) = if response[1] == 0x04 {
             // Text configuration - read additional packets
             let text_len = (response[0] as usize).saturating_sub(2).min(38);
             let mut text_data = vec![0u8; 38];
@@ -321,7 +231,7 @@ impl PCsensorDevice {
             // Read remaining packets if needed
             let mut bytes_read = 6;
             while bytes_read < text_len {
-                let packet = self.hid_read()?;
+                let packet = Self::hid_read(&device)?;
                 let chunk_len = (text_len - bytes_read).min(8);
                 text_data[bytes_read..bytes_read + chunk_len].copy_from_slice(&packet[..chunk_len]);
                 bytes_read += chunk_len;
@@ -331,24 +241,43 @@ impl PCsensorDevice {
             let mut text_array: [u8; 38] = [0; 38];
             text_array.copy_from_slice(&text_data);
             let text = TextConfiguration::decode_from_protocol(&text_array);
-            self.configurations[pedal_index] = Configuration::Text(TextConfiguration::new(text));
+            (Configuration::Text(TextConfiguration::new(text)), TriggerMode::Press)
         } else {
             // Parse other configuration types normally
-            self.configurations[pedal_index] = self.parse_configuration(&response);
+            let config = Self::parse_configuration(&response);
+
+            // Trigger mode is in the response type (0x81 means inverted/one-shot)
+            let trigger_mode = if response[1] & 0x80 != 0 {
+                TriggerMode::Release
+            } else {
+                TriggerMode::Press
+            };
+
+            (config, trigger_mode)
+        };
+
+        // Drop device lock before acquiring other locks
+        drop(device);
+
+        // Update configurations
+        {
+            let mut configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+            configurations[pedal_index] = config;
         }
 
-        // Trigger mode is in the response type (0x81 means inverted/one-shot)
-        self.trigger_modes[pedal_index] = if response[1] & 0x80 != 0 {
-            TriggerMode::Release
-        } else {
-            TriggerMode::Press
-        };
+        // Update trigger modes
+        {
+            let mut trigger_modes = self.trigger_modes.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock trigger modes".to_string()))?;
+            trigger_modes[pedal_index] = trigger_mode;
+        }
 
         Ok(())
     }
 
     /// Encode configuration to HID format
-    fn encode_configuration(&self, config: &Configuration, _trigger: TriggerMode) -> Vec<u8> {
+    fn encode_configuration(config: &Configuration, _trigger: TriggerMode) -> Vec<u8> {
         let mut data = Vec::new();
 
         match config {
@@ -442,7 +371,7 @@ impl PCsensorDevice {
     }
 
     /// Write configuration for a specific pedal
-    fn write_pedal_config(&mut self, pedal_index: usize) -> Result<()> {
+    fn write_pedal_config(&self, pedal_index: usize) -> Result<()> {
         if pedal_index >= self.capabilities.pedal_count {
             return Err(PedalError::InvalidPedalIndex(
                 pedal_index,
@@ -450,17 +379,29 @@ impl PCsensorDevice {
             ));
         }
 
+        // Get configuration and trigger mode first
+        let (config, trigger_mode) = {
+            let configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+            let trigger_modes = self.trigger_modes.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock trigger modes".to_string()))?;
+            (configurations[pedal_index].clone(), trigger_modes[pedal_index])
+        };
+
+        let device = self.device.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
+
         // Start write sequence
         let start: [u8; 8] = [0x01, 0x80, 0x08, 0, 0, 0, 0, 0];
-        self.hid_write(&start)?;
+        Self::hid_write(&device, &start)?;
         thread::sleep(Duration::from_secs(1));
 
         // Write pedal header
         let header: [u8; 8] = [0x01, 0x81, 0x08, (pedal_index + 1) as u8, 0, 0, 0, 0];
-        self.hid_write(&header)?;
+        Self::hid_write(&device, &header)?;
 
         // Special handling for text configuration
-        if let Configuration::Text(text) = &self.configurations[pedal_index] {
+        if let Configuration::Text(text) = &config {
             // Text configuration requires special multi-packet format
             let text_data = text.encode_for_protocol();
 
@@ -476,7 +417,7 @@ impl PCsensorDevice {
             if first_chunk_len > 0 {
                 first_packet[2..2 + first_chunk_len].copy_from_slice(&text_data[..first_chunk_len]);
             }
-            self.hid_write(&first_packet)?;
+            Self::hid_write(&device, &first_packet)?;
 
             // Write remaining text in 8-byte packets
             let mut offset = 6;
@@ -484,32 +425,22 @@ impl PCsensorDevice {
                 let mut packet = [0u8; 8];
                 let chunk_len = (text_len - offset).min(8);
                 packet[..chunk_len].copy_from_slice(&text_data[offset..offset + chunk_len]);
-                self.hid_write(&packet)?;
+                Self::hid_write(&device, &packet)?;
                 offset += 8;
             }
         } else {
             // Encode and write other configuration types
-            let config_data = self.encode_configuration(
-                &self.configurations[pedal_index],
-                self.trigger_modes[pedal_index]
-            );
+            let config_data = Self::encode_configuration(&config, trigger_mode);
 
             // Write in 8-byte chunks
             for chunk in config_data.chunks(8) {
                 let mut packet = [0u8; 8];
                 packet[..chunk.len()].copy_from_slice(chunk);
-                self.hid_write(&packet)?;
+                Self::hid_write(&device, &packet)?;
             }
         }
 
         Ok(())
-    }
-}
-
-impl Drop for PCsensorDevice {
-    fn drop(&mut self) {
-        // Release the interface when dropping
-        let _ = self.handle.release_interface(self.interface_number);
     }
 }
 
@@ -547,10 +478,12 @@ impl PedalDevice for PCsensorDevice {
                 self.write_pedal_config(i)?;
             } else {
                 // Write empty config for non-existent pedals
+                let device = self.device.lock()
+                    .map_err(|_| PedalError::Hid("Failed to lock device".to_string()))?;
                 let header: [u8; 8] = [0x01, 0x81, 0x08, (i + 1) as u8, 0, 0, 0, 0];
-                self.hid_write(&header)?;
+                Self::hid_write(&device, &header)?;
                 let empty: [u8; 8] = [8, 0, 0, 0, 0, 0, 0, 0];
-                self.hid_write(&empty)?;
+                Self::hid_write(&device, &empty)?;
             }
         }
         Ok(())
@@ -563,7 +496,9 @@ impl PedalDevice for PCsensorDevice {
                 self.capabilities.pedal_count,
             ));
         }
-        Ok(self.configurations[pedal_index].clone())
+        let configurations = self.configurations.lock()
+            .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+        Ok(configurations[pedal_index].clone())
     }
 
     fn set_pedal_configuration(
@@ -577,13 +512,28 @@ impl PedalDevice for PCsensorDevice {
                 self.capabilities.pedal_count,
             ));
         }
-        self.configurations[pedal_index] = config;
-        self.modified_pedals[pedal_index] = true;
+
+        {
+            let mut configurations = self.configurations.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock configurations".to_string()))?;
+            configurations[pedal_index] = config;
+        }
+
+        {
+            let mut modified_pedals = self.modified_pedals.lock()
+                .map_err(|_| PedalError::Hid("Failed to lock modified flags".to_string()))?;
+            modified_pedals[pedal_index] = true;
+        }
+
         Ok(())
     }
 
     fn has_modifications(&self) -> bool {
-        self.modified_pedals.iter().any(|&m| m)
+        if let Ok(modified_pedals) = self.modified_pedals.lock() {
+            modified_pedals.iter().any(|&m| m)
+        } else {
+            false
+        }
     }
 
     fn last_error(&self) -> Option<&str> {
