@@ -1,0 +1,11 @@
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+[target.x86_64-pc-windows-msvc]
+# For MSVC target (if using Wine and MSVC toolchain)
+# linker = "lld-link"
+# rustflags = ["-Lnative=/path/to/windows/libs"]
+
+# Optional: Set default target
+# [build]
+# target = "x86_64-pc-windows-gnu"

@@ -1,0 +1,87 @@
+; ClutchCtl WinUSB Driver Installation File
+; Right-click this file and select "Install" to install the driver
+; Or use: pnputil /add-driver clutchctl-winusb.inf /install
+
+[Version]
+Signature = "$Windows NT$"
+Class = USBDevice
+ClassGUID = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider = %ManufacturerName%
+CatalogFile = clutchctl-winusb.cat
+DriverVer = 01/16/2025,0.3.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64,NTx86
+
+[Standard.NTamd64]
+%DeviceName.iKKEGOL% = USB_Install, USB\VID_1a86&PID_e026
+%DeviceName.PCsensor1% = USB_Install, USB\VID_3553&PID_b001
+%DeviceName.PCsensor2% = USB_Install, USB\VID_0c45&PID_7403
+%DeviceName.PCsensor3% = USB_Install, USB\VID_0c45&PID_7404
+%DeviceName.PCsensor4% = USB_Install, USB\VID_413d&PID_2107
+%DeviceName.Scythe% = USB_Install, USB\VID_0426&PID_3011
+%DeviceName.Scythe2% = USB_Install, USB\VID_055a&PID_0998
+%DeviceName.FootSwitch1P% = USB_Install, USB\VID_5131&PID_2019
+
+[Standard.NTx86]
+%DeviceName.iKKEGOL% = USB_Install, USB\VID_1a86&PID_e026
+%DeviceName.PCsensor1% = USB_Install, USB\VID_3553&PID_b001
+%DeviceName.PCsensor2% = USB_Install, USB\VID_0c45&PID_7403
+%DeviceName.PCsensor3% = USB_Install, USB\VID_0c45&PID_7404
+%DeviceName.PCsensor4% = USB_Install, USB\VID_413d&PID_2107
+%DeviceName.Scythe% = USB_Install, USB\VID_0426&PID_3011
+%DeviceName.Scythe2% = USB_Install, USB\VID_055a&PID_0998
+%DeviceName.FootSwitch1P% = USB_Install, USB\VID_5131&PID_2019
+
+[USB_Install]
+Include = winusb.inf
+Needs = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+AddService = WinUSB,0x00000002,WinUSB_ServiceInstall
+
+[USB_Install.Wdf]
+KmdfService = WINUSB, WinUSB_Install
+
+[WinUSB_Install]
+KmdfLibraryVersion = 1.11
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+; Application GUID - used by libusb to identify the device
+HKR,,DeviceInterfaceGUIDs,0x10000,"{9f543223-cede-4fa3-b376-a25ce9a30e74}"
+
+[USB_Install.CoInstallers]
+AddReg = CoInstallers_AddReg
+CopyFiles = CoInstallers_CopyFiles
+
+[CoInstallers_AddReg]
+HKR,,CoInstallers32,0x00010000,"WdfCoInstaller01011.dll,WdfCoInstaller"
+
+[CoInstallers_CopyFiles]
+WdfCoInstaller01011.dll
+
+[DestinationDirs]
+CoInstallers_CopyFiles=11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+WdfCoInstaller01011.dll=1
+
+[Strings]
+ManufacturerName = "ClutchCtl Contributors"
+DiskName = "ClutchCtl USB Driver Installation Disk"
+DeviceName.iKKEGOL = "iKKEGOL USB Foot Pedal (FS2020U1IR/FS2017U1IR)"
+DeviceName.PCsensor1 = "PCsensor FootSwitch USB Pedal (3553:b001)"
+DeviceName.PCsensor2 = "PCsensor FootSwitch USB Pedal (0c45:7403)"
+DeviceName.PCsensor3 = "PCsensor FootSwitch USB Pedal (0c45:7404)"
+DeviceName.PCsensor4 = "PCsensor FootSwitch USB Pedal (413d:2107)"
+DeviceName.Scythe = "Scythe USB Foot Switch"
+DeviceName.Scythe2 = "Scythe USB Foot Switch II"
+DeviceName.FootSwitch1P = "USB Foot Switch (Single Pedal)"

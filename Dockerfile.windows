@@ -1,0 +1,22 @@
+# Dockerfile for Windows cross-compilation
+FROM rust:1.75
+
+# Install MinGW for Windows cross-compilation
+RUN apt-get update && apt-get install -y \
+    gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Windows target
+RUN rustup target add x86_64-pc-windows-gnu
+
+# Set working directory
+WORKDIR /app
+
+# Copy source code
+COPY . .
+
+# Build for Windows
+RUN cargo build --release --target x86_64-pc-windows-gnu
+
+# The executable will be at:
+# target/x86_64-pc-windows-gnu/release/clutchctl.exe

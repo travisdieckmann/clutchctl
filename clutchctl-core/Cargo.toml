@@ -1,0 +1,31 @@
+[package]
+name = "clutchctl-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core library for USB HID foot pedal device configuration"
+
+[dependencies]
+rusb = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+bitflags = { workspace = true }
+once_cell = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+proptest = { workspace = true }
+env_logger = { workspace = true }
+
+[features]
+default = []
+serialization = ["dep:serde", "dep:serde_json"]
+
+[lib]
+name = "clutchctl_core"
+path = "src/lib.rs"
