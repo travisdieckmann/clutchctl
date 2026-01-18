@@ -8,12 +8,18 @@ use clutchctl_core::device::discover_devices;
 pub fn execute() -> Result<()> {
     println!("Discovering USB pedal devices...\n");
 
+    #[cfg(target_os = "linux")]
     let devices = discover_devices()
         .context("Failed to discover USB devices. Try running with sudo if you see permission errors.")?;
+
+    #[cfg(not(target_os = "linux"))]
+    let devices = discover_devices()
+        .context("Failed to discover USB devices. Try running as Administrator if you see permission errors.")?;
 
     if devices.is_empty() {
         println!("{}", "No pedal devices found.".yellow());
         println!("\nMake sure your device is connected and you have the necessary permissions.");
+        #[cfg(target_os = "linux")]
         println!("On Linux, you may need to install udev rules or run with sudo.");
         return Ok(());
     }
