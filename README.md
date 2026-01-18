@@ -79,31 +79,25 @@ All devices use similar HID protocols and support keyboard, mouse, text, media, 
 ### Prerequisites
 
 - **Rust 1.70 or later** - [Install Rust](https://www.rust-lang.org/tools/install)
-- **libusb-1.0 development libraries**
+- **Platform-specific HID libraries**
 
-#### Installing libusb
+#### Platform Requirements
 
 **Linux (Ubuntu/Debian):**
 ```bash
-sudo apt-get install libusb-1.0-0-dev
+sudo apt-get install libudev-dev libusb-1.0-0-dev pkg-config
 ```
 
 **Linux (Fedora/RHEL):**
 ```bash
-sudo dnf install libusb1-devel
+sudo dnf install systemd-devel libusb1-devel pkg-config
 ```
 
 **macOS:**
-```bash
-brew install libusb
-```
+No additional dependencies required - uses IOKit (included with macOS).
 
 **Windows:**
-- USB driver required - the Windows distribution includes:
-  - `install-driver.bat` - Automated driver installer (downloads Zadig if needed)
-  - `clutchctl-winusb.inf` - Direct driver installation file
-- Supports both iKKEGOL (VID: 1a86) and PCsensor (VID: 3553) devices
-- See [WINDOWS.md](WINDOWS.md) for detailed instructions
+No additional dependencies required - uses the native Windows HID driver.
 
 ### Building from Source
 
@@ -123,17 +117,30 @@ cargo install --path clutchctl-cli
 
 ### Linux Setup
 
-On Linux, you need to set up udev rules for non-root access:
+On Linux, you need to set up udev rules for non-root USB access:
 
 ```bash
 # Create udev rules file
 sudo tee /etc/udev/rules.d/70-footpedal.rules << EOF
-SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e026", ACTION=="add", MODE="0666", GROUP="usb"
+# iKKEGOL foot pedals
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="e026", MODE="0666"
+# PCsensor foot pedals
+SUBSYSTEM=="usb", ATTR{idVendor}=="3553", ATTR{idProduct}=="b001", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0c45", ATTR{idProduct}=="7403", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0c45", ATTR{idProduct}=="7404", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="413d", ATTR{idProduct}=="2107", MODE="0666"
+# Scythe foot pedals
+SUBSYSTEM=="usb", ATTR{idVendor}=="0426", ATTR{idProduct}=="3011", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="055a", ATTR{idProduct}=="0998", MODE="0666"
+# Single pedal variant
+SUBSYSTEM=="usb", ATTR{idVendor}=="5131", ATTR{idProduct}=="2019", MODE="0666"
 EOF
 
 # Reload udev rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
+
+# Unplug and replug your device for the rules to take effect
 ```
 
 ## 💻 Usage <a name = "usage"></a>
@@ -353,5 +360,5 @@ Contributions are welcome! Please feel free to submit pull requests.
 ## 🙏 Additional Thanks
 
 - iKKEGOL, PCsensor, Scythe, and other manufacturers for their USB foot pedal devices
-- The Rust community for excellent libraries (rusb, clap, serde, etc.)
+- The Rust community for excellent libraries (hidapi, clap, serde, etc.)
 - All contributors and users who help improve this tool

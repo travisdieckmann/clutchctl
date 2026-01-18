@@ -1,5 +1,9 @@
 # Windows Build and Usage Guide
 
+## Native Windows HID Support
+
+ClutchCtl now uses the native Windows HID driver via the `hidapi` library. **No additional driver installation (like Zadig) is required!** The foot pedal devices work directly with the built-in Windows HID class driver.
+
 ## Building for Windows (Cross-compilation from Linux)
 
 ### Prerequisites
@@ -32,7 +36,6 @@ The executable will be at: `target/x86_64-pc-windows-gnu/release/clutchctl.exe`
 
 1. Install [Rust for Windows](https://www.rust-lang.org/tools/install)
 2. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) or Visual Studio with C++ support
-3. Install [Zadig](https://zadig.akeo.ie/) for USB driver management
 
 ### Building
 
@@ -43,41 +46,6 @@ cargo build --release
 # The executable will be at:
 # target\release\clutchctl.exe
 ```
-
-## USB Driver Setup on Windows
-
-Windows requires proper USB drivers for libusb to work. The distribution includes helper files for driver installation.
-
-### Option 1: Automated Installation (Recommended)
-
-Run the included batch file:
-```cmd
-install-driver.bat
-```
-This will download Zadig if needed and guide you through the installation.
-
-### Option 2: INF File Installation
-
-For systems with Windows Driver Kit:
-1. Right-click `clutchctl-winusb.inf`
-2. Select "Install"
-
-Or from Administrator Command Prompt:
-```cmd
-pnputil /add-driver clutchctl-winusb.inf /install
-```
-
-### Option 3: Manual Zadig Installation
-
-1. Download and run [Zadig](https://zadig.akeo.ie/)
-2. Connect your USB pedal device
-3. In Zadig:
-   - Click "Options" → "List All Devices"
-   - Select your device from the dropdown:
-     - iKKEGOL: VID 1a86, PID e026
-     - PCsensor: VID 3553, PID b001
-   - Select "WinUSB" as the driver
-   - Click "Install Driver"
 
 ## Running on Windows
 
@@ -101,62 +69,42 @@ clutchctl.exe set 0 1 keyboard "ctrl+s"
 
 ### "Access Denied" or "Permission Denied"
 
-- Make sure you've installed the WinUSB driver using Zadig
 - Try running as Administrator
-- Check that no other program is using the device
+- Check that no other program is using the device (close any vendor configuration software)
+- Unplug and replug the device
 
 ### "Device Not Found"
 
 - Verify the device is connected
-- Check Device Manager for the device
-- Make sure the driver is installed for your specific device:
-  - iKKEGOL devices: VID 1a86, PID e026
-  - PCsensor FootSwitch: VID 3553, PID b001
-- Reinstall the WinUSB driver using Zadig or the provided install-driver.bat
+- Check Device Manager - the device should appear under "Human Interface Devices"
+- Make sure the device is not being used by another application
 
-### "Cannot find -lusb-1.0"
+### Previously Used Zadig
 
-- This means libusb is not properly installed
-- The cross-compiled version from Linux includes libusb statically
-- For native Windows builds, libusb should be bundled automatically by cargo
+If you previously installed a WinUSB driver using Zadig for this device, you may need to restore the original HID driver:
+
+1. Open Device Manager
+2. Find your foot pedal device (may be under "Universal Serial Bus devices")
+3. Right-click → "Update driver"
+4. Select "Browse my computer for drivers"
+5. Select "Let me pick from a list of available drivers"
+6. Choose "USB Input Device" or "HID-compliant device"
+7. Click "Next" to install the HID driver
+
+After restoring the HID driver, the device should work with ClutchCtl without any additional configuration.
 
 ## Distribution
 
 When distributing the Windows executable:
 
 1. The `.exe` file is standalone (statically linked)
-2. Users will need to install WinUSB driver using Zadig
-3. Consider creating an installer that:
-   - Includes the executable
-   - Provides Zadig or driver installation instructions
-   - Creates Start Menu shortcuts
-
-## Creating a Windows Installer (Optional)
-
-You can use [Inno Setup](https://jrsoftware.org/isinfo.php) to create an installer:
-
-```iss
-[Setup]
-AppName=ClutchCtl
-AppVersion=0.3.0
-DefaultDirName={pf}\ClutchCtl
-DefaultGroupName=ClutchCtl
-OutputBaseFilename=clutchctl-setup
-
-[Files]
-Source: "clutchctl.exe"; DestDir: "{app}"
-Source: "README.md"; DestDir: "{app}"; Flags: isreadme
-
-[Icons]
-Name: "{group}\ClutchCtl"; Filename: "{app}\clutchctl.exe"
-
-[Run]
-Filename: "https://zadig.akeo.ie/"; Description: "Download Zadig for USB driver setup"; Flags: shellexec postinstall skipifsilent
-```
+2. **No driver installation is needed** - uses native Windows HID driver
+3. Users can simply run the executable after connecting their device
 
 ## Notes
 
 - The Windows version uses the same USB protocol as Linux/macOS
 - All configuration commands work identically across platforms
 - Performance should be comparable to the Linux version
-- The executable is about 5-10 MB (includes Rust runtime and libusb)
+- The executable is about 5-10 MB (includes Rust runtime)
+- Uses native Windows HID API via `hidapi` library

@@ -52,16 +52,15 @@ RUST_LOG=trace clutchctl show 0  # Trace level
 ## Architecture
 
 ### Layered Design
-1. **USB Layer** (`clutchctl-core/src/usb/`): Low-level USB communication with RAII interface management
+1. **USB/HID Layer** (`clutchctl-core/src/usb/`): Cross-platform HID communication via hidapi (Windows HID, Linux hidraw, macOS IOKit)
 2. **Protocol Layer** (`clutchctl-core/src/protocol/`): Binary packet structures (40-byte fixed size), encoding/decoding
-3. **Device Layer** (`clutchctl-core/src/device/`): `PedalDevice` trait, `IkkegolDevice` implementation, device discovery
+3. **Device Layer** (`clutchctl-core/src/device/`): `PedalDevice` trait, `IkkegolDevice` and `PCsensorDevice` implementations, device discovery
 4. **Configuration Layer** (`clutchctl-core/src/configuration/`): Keyboard, Mouse, Text, Media, Gamepad configuration types
 5. **CLI Layer** (`clutchctl-cli/src/commands/`): list, show, set commands with Clap parsing
 
 ### Key USB Constants
-- Vendor ID: `0x1a86`, Product ID: `0xe026`
-- Config Interface: `1`, Config Endpoint: `0x02`
-- Protocol: 40-byte binary packets
+- Vendor ID: `0x1a86`, Product ID: `0xe026` (iKKEGOL)
+- Protocol: 40-byte binary packets with 8-byte HID reports
 
 ### Supported Device Models
 - **iKKEGOL Models** (VID: 0x1a86, PID: 0xe026)
@@ -104,24 +103,28 @@ Pedals can be referenced by index (1-based) or name (left/middle/right/pedal).
 ## Platform Requirements
 
 ### Linux
-- libusb-1.0-dev required
-- Udev rules needed for non-root access (see README.md Linux Setup section for configuration)
+- libudev-dev, libusb-1.0-0-dev, and pkg-config required for building
+- Udev rules needed for non-root USB access (see README.md Linux Setup section)
 
 ### Windows
-- WinUSB driver installation via Zadig required
-- Statically linked libusb in release builds
+- No additional drivers needed - uses native Windows HID driver
+- No Zadig installation required
 
 ### macOS
-- libusb via Homebrew (`brew install libusb`)
+- No additional dependencies - uses IOKit (included with macOS)
 
 ## Important Implementation Details
 
+- Uses `hidapi` crate for cross-platform HID communication
+  - Linux: Uses libusb backend (not hidraw) to access interface 1 for bidirectional communication
+  - Windows: Uses native Windows HID driver (no Zadig needed)
+  - macOS: Uses IOKit
 - Binary protocol maintains 100% compatibility with the C++ pedalctl and C footswitch implementations
 - Configuration packets are exactly 40 bytes (validated in tests)
-- USB timeout is 100ms (constant in `clutchctl-core/src/lib.rs`)
-- Device discovery performs linear USB scan filtering by vendor/product ID
-- UsbInterfaceLock uses RAII pattern for automatic interface claim/release
-- Error handling converts rusb errors to user-friendly messages via PedalError enum
+- HID read timeout varies by device model (100ms-500ms)
+- Device discovery uses hidapi's native device enumeration
+- Mutex-wrapped HidDevice for thread safety
+- Error handling converts hidapi errors to user-friendly messages via PedalError enum
 
 ## Testing Focus Areas
 - Protocol encoding/decoding correctness
