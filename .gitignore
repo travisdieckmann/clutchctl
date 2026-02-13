@@ -16,3 +16,6 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings (contains user-specific paths)
+.claude/settings.local.json
