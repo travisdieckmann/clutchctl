@@ -44,7 +44,7 @@ This project provides a command-line tool (clutchctl) to configure foot-pedal de
 
 - Configure programmable USB foot pedals
 - Support for multiple configuration types:
-  - **Keyboard**: Key combinations with modifiers (Ctrl, Shift, Alt, etc.)
+  - **Keyboard**: Key combinations with modifiers (Ctrl, Shift, Alt, Win/Super/Cmd)
   - **Mouse**: Button clicks or axis movement
   - **Text**: Type custom text strings
   - **Media**: Media control keys (play/pause, volume, etc.)
@@ -191,12 +191,34 @@ clutchctl set 0 1 keyboard "f1"
 clutchctl set 0 1 keyboard "ctrl+c"
 clutchctl set 0 1 keyboard "lshift+a"
 
+# Windows/Super/Cmd key combinations
+clutchctl set 0 1 keyboard "win+r"         # Windows: Open Run dialog
+clutchctl set 0 1 keyboard "win+l"         # Windows: Lock screen
+clutchctl set 0 1 keyboard "win+shift+s"   # Windows: Screenshot snippet
+clutchctl set 0 1 keyboard "cmd+space"     # macOS: Spotlight
+clutchctl set 0 1 keyboard "super+e"       # Linux: File manager (desktop-dependent)
+
 # One-shot mode (key press only once)
 clutchctl set 0 1 keyboard "enter" --once
 
 # Trigger on release instead of press
 clutchctl set 0 1 keyboard "space" --invert
 ```
+
+**Supported Modifier Keys:**
+
+| Modifier | Aliases | Notes |
+|----------|---------|-------|
+| Left Ctrl | `ctrl`, `control`, `lctrl`, `lcontrol` | `ctrl` defaults to left |
+| Right Ctrl | `rctrl`, `rcontrol` | |
+| Left Shift | `shift`, `lshift` | `shift` defaults to left |
+| Right Shift | `rshift` | |
+| Left Alt | `alt`, `lalt` | `alt` defaults to left |
+| Right Alt | `ralt` | |
+| Left Super/Win/Cmd | `win`, `super`, `cmd`, `lwin`, `lsuper`, `lcmd` | `win`/`super`/`cmd` default to left |
+| Right Super/Win/Cmd | `rwin`, `rsuper`, `rcmd` | |
+
+All modifier names are case-insensitive. Combine modifiers and keys with `+` (e.g., `"ctrl+shift+alt+f1"`).
 
 #### Mouse Configuration
 
