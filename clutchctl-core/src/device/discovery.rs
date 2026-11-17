@@ -39,6 +39,14 @@ pub fn discover_devices() -> Result<Vec<Arc<dyn crate::device::PedalDevice + Sen
 
             debug!("Checking HID device: VID={:04x} PID={:04x}", vendor_id, product_id);
 
+	    // For PCsensor 3553:B001, skip interfaces other than MI_01.
+	    if vendor_id == 0x3553
+    		&& product_id == 0xb001
+   		&& device_info.interface_number() != 1
+	    {
+   		continue;
+	    }
+
             // Check if this is a supported device
             for &(supported_vid, supported_pid, device_type) in SUPPORTED_DEVICES {
                 if vendor_id == supported_vid && product_id == supported_pid {
